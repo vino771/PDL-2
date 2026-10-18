@@ -1,0 +1,8 @@
+# AI Layer Additional Requirements
+# Install with: pip install -r ai_requirements.txt
+# (using the same .venv as the existing project)
+
+ollama>=0.3.0
+requests>=2.28.0       # already installed — listed for clarity
+python-dotenv>=1.0.0   # already installed — listed for clarity
+Flask>=3.0.0          # required by firebase_bridge.py
