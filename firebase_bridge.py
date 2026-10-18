@@ -38,11 +38,15 @@ if firebase_admin._DEFAULT_APP_NAME not in firebase_admin._apps:
 
 sensor_ref = db.reference("/floatingSolarPanel/sensors")
 tracking_ref = db.reference("/floatingSolarPanel/tracking")
+servo_ctrl_ref = db.reference("/floatingSolarPanel/servoControl")
 
 logs = deque(maxlen=200)
 log_lock = Lock()
 command_queue = Queue()
 sequence = 0
+
+# Servo confirmation tolerance (degrees)
+_SERVO_CONFIRM_TOL = 3
 
 
 def process_serial_line(raw_line):
@@ -92,11 +96,45 @@ def process_serial_line(raw_line):
         })
 
         # Update only tracking fields.
+        # In MANUAL mode, preserve the mode label; otherwise write TRACKING.
+        try:
+            sc = servo_ctrl_ref.get() or {}
+        except Exception:
+            sc = {}
+
+        ctrl_mode = sc.get("mode", "AUTO")
+        tracking_status = "MANUAL" if ctrl_mode == "MANUAL" else "TRACKING"
         tracking_ref.update({
             "horizontalAngle": servo_x,
             "verticalAngle": servo_y,
-            "status": "TRACKING",
+            "status": tracking_status,
         })
+
+        # Auto-confirm a PENDING servo command if reported angles match.
+        if (
+            ctrl_mode == "MANUAL"
+            and sc.get("status") == "PENDING"
+            and sc.get("requestedH") is not None
+            and sc.get("requestedV") is not None
+            and abs(servo_x - int(sc["requestedH"])) <= _SERVO_CONFIRM_TOL
+            and abs(servo_y - int(sc["requestedV"])) <= _SERVO_CONFIRM_TOL
+        ):
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).astimezone().isoformat(
+                timespec="seconds"
+            )
+            try:
+                servo_ctrl_ref.update({
+                    "status": "CONFIRMED",
+                    "confirmedAt": now_iso,
+                    "confirmedH": servo_x,
+                    "confirmedV": servo_y,
+                })
+                print(
+                    f"Servo command confirmed: H={servo_x} V={servo_y}"
+                )
+            except Exception as confirm_exc:
+                print(f"Could not write servo confirmation: {confirm_exc}")
 
         with log_lock:
             sequence += 1
@@ -185,6 +223,16 @@ def reset():
     with log_lock:
         logs.clear()
     return jsonify({"status": "logs cleared"})
+
+
+@app.get("/servo_status")
+def servo_status():
+    """Return current /floatingSolarPanel/servoControl node for the dashboard."""
+    try:
+        data = servo_ctrl_ref.get() or {}
+        return jsonify({"ok": True, "servoControl": data})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":
